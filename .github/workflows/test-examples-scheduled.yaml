@@ -109,9 +109,14 @@ jobs:
             PORT=$(python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")
             echo "Starting application on port $PORT..."
 
-            # Run the app in the background with timeout
-            timeout 15s python -m shiny run "${example_dir}app.py" --port "$PORT" > "$log_file" 2>&1 &
+            # Get absolute path to app.py
+            APP_PATH=$(realpath "${example_dir}app.py")
+
+            # Run the app from /tmp to avoid importing from the repo directory
+            cd /tmp
+            timeout 15s python -m shiny run "$APP_PATH" --port "$PORT" > "$log_file" 2>&1 &
             APP_PID=$!
+            cd - > /dev/null
 
             # Wait for app to start (up to 5 seconds)
             STARTED=false
