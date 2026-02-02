@@ -12,10 +12,6 @@ env:
 jobs:
   test-examples:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
-      fail-fast: false
 
     steps:
       - name: Checkout repository
@@ -235,24 +231,24 @@ jobs:
             const issueTitle = `Scheduled Examples Test Failed - ${failedCount} example(s) failing`;
             const issueBody = `## Scheduled Examples Test Failure
 
-The scheduled test of example applications has detected failures.
+            The scheduled test of example applications has detected failures.
 
-### Failed Examples
-${failedList}
+            ### Failed Examples
+            ${failedList}
 
-### Details
-- **Run Date**: ${new Date().toISOString().split('T')[0]}
-- **Workflow Run**: [View full logs](${runUrl})
-- **Python Version**: ${{ matrix.python-version }}
+            ### Details
+            - **Run Date**: ${new Date().toISOString().split('T')[0]}
+            - **Workflow Run**: [View full logs](${runUrl})
+            - **Python Version**: ${{ env.PYTHON_VERSION }}
 
-### Next Steps
-1. Review the [workflow logs](${runUrl}) for detailed error messages
-2. Test the failing examples locally
-3. Fix any startup errors, exceptions, or critical warnings
-4. Ensure all example dependencies are correctly specified
+            ### Next Steps
+            1. Review the [workflow logs](${runUrl}) for detailed error messages
+            2. Test the failing examples locally
+            3. Fix any startup errors, exceptions, or critical warnings
+            4. Ensure all example dependencies are correctly specified
 
----
-*This issue was automatically created by the \`test-examples-scheduled.yaml\` workflow.*`;
+            ---
+            *This issue was automatically created by the \`test-examples-scheduled.yaml\` workflow.*`;
 
             // Create new issue
             const newIssue = await github.rest.issues.create({
