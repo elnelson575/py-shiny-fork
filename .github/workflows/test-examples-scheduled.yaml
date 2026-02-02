@@ -85,8 +85,8 @@ jobs:
             python -m venv "$venv_dir"
             source "$venv_dir/bin/activate"
 
-            # Install py-shiny in the isolated environment
-            pip install -q -e .
+            # Install latest released py-shiny in the isolated environment
+            pip install -q shiny
 
             # Install example-specific requirements if they exist
             if [ -f "${example_dir}requirements.txt" ]; then
