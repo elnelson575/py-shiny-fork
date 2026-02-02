@@ -214,7 +214,7 @@ jobs:
             {
               echo "FAILED_LIST<<EOF"
               for example in "${FAILED_EXAMPLES[@]}"; do
-                echo "- $example"
+                echo "$example"
               done
               echo "EOF"
             } >> $GITHUB_OUTPUT
@@ -225,43 +225,113 @@ jobs:
             echo "FAILED_COUNT=0" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create issue on failure
-        if: failure() && steps.test-examples.outputs.FAILED_COUNT > 0
+          # Save passed examples for issue cleanup
+          {
+            echo "PASSED_LIST<<EOF"
+            for example in "${PASSED_EXAMPLES[@]}"; do
+              echo "$example"
+            done
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Manage issues for failed/passed examples
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            const failedCount = '${{ steps.test-examples.outputs.FAILED_COUNT }}';
-            const failedList = `${{ steps.test-examples.outputs.FAILED_LIST }}`;
+            const failedList = '${{ steps.test-examples.outputs.FAILED_LIST }}'.split('\n').filter(x => x.trim());
+            const passedList = '${{ steps.test-examples.outputs.PASSED_LIST }}'.split('\n').filter(x => x.trim());
             const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            const labelName = 'example-test-failure';
 
-            const issueTitle = `Scheduled Examples Test Failed - ${failedCount} example(s) failing`;
-            const issueBody = `## Scheduled Examples Test Failure
+            // Get all open issues with the example-test-failure label
+            const { data: openIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: labelName,
+              state: 'open'
+            });
 
-            The scheduled test of example applications has detected failures.
+            // Create a map of example name to issue
+            const issueMap = new Map();
+            for (const issue of openIssues) {
+              // Extract example name from issue title (format: "Example test failure: example-name")
+              const match = issue.title.match(/^Example test failure: (.+)$/);
+              if (match) {
+                issueMap.set(match[1], issue);
+              }
+            }
 
-            ### Failed Examples
-            ${failedList}
+            // Process failed examples
+            for (const failedExample of failedList) {
+              if (!failedExample) continue;
 
-            ### Details
+              // Extract example name (remove any parenthetical error info)
+              const exampleName = failedExample.split(' (')[0].trim();
+
+              if (!issueMap.has(exampleName)) {
+                // Create new issue for this example
+                const issueTitle = `Example test failure: ${exampleName}`;
+                const issueBody = `## Example Test Failure
+
+            The example \`${exampleName}\` is failing in the scheduled tests.
+
+            ### Failure Details
+            - **Status**: ${failedExample}
             - **Run Date**: ${new Date().toISOString().split('T')[0]}
             - **Workflow Run**: [View full logs](${runUrl})
             - **Python Version**: ${{ env.PYTHON_VERSION }}
 
             ### Next Steps
             1. Review the [workflow logs](${runUrl}) for detailed error messages
-            2. Test the failing examples locally
+            2. Test the example locally with: \`cd examples/${exampleName} && python -m shiny run app.py\`
             3. Fix any startup errors, exceptions, or critical warnings
-            4. Ensure all example dependencies are correctly specified
+            4. Ensure all example dependencies are correctly specified in requirements.txt
 
             ---
-            *This issue was automatically created by the \`test-examples-scheduled.yaml\` workflow.*`;
+            *This issue was automatically created by the \`test-examples-scheduled.yaml\` workflow and will be automatically closed when the example passes.*`;
 
-            // Create new issue
-            const newIssue = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: issueTitle,
-              body: issueBody,
-              labels: ['scheduled-test-failure', 'examples', 'bug']
-            });
-            console.log(`Created new issue #${newIssue.data.number}`);
+                const newIssue = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: issueTitle,
+                  body: issueBody,
+                  labels: [labelName, 'examples', 'bug']
+                });
+                console.log(`Created issue #${newIssue.data.number} for ${exampleName}`);
+              } else {
+                // Issue already exists, add a comment with the latest failure
+                const issue = issueMap.get(exampleName);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `Example still failing as of ${new Date().toISOString().split('T')[0]}.\n\n**Status**: ${failedExample}\n**Workflow Run**: [View logs](${runUrl})`
+                });
+                console.log(`Updated issue #${issue.number} for ${exampleName}`);
+              }
+            }
+
+            // Process passed examples - close any open issues
+            for (const passedExample of passedList) {
+              if (!passedExample) continue;
+
+              const exampleName = passedExample.trim();
+
+              if (issueMap.has(exampleName)) {
+                const issue = issueMap.get(exampleName);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `✅ Example is now passing as of ${new Date().toISOString().split('T')[0]}.\n\n**Workflow Run**: [View logs](${runUrl})\n\nClosing this issue automatically.`
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed'
+                });
+                console.log(`Closed issue #${issue.number} for ${exampleName} (now passing)`);
+              }
+            }
