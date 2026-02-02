@@ -1,0 +1,265 @@
+name: Test Examples on Schedule
+
+on:
+  schedule:
+    # Run weekly on Mondays at 2 AM UTC
+    - cron: "0 2 * * 1"
+  workflow_dispatch: # Allow manual triggering
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  test-examples:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Setup py-shiny
+        id: install
+        uses: ./.github/py-shiny/setup
+
+      - name: Test all examples
+        id: test-examples
+        run: |
+          set -e
+
+          # Initialize results tracking
+          FAILED_EXAMPLES=()
+          PASSED_EXAMPLES=()
+          TOTAL=0
+
+          echo "======================================"
+          echo "Testing all example applications"
+          echo "======================================"
+          echo ""
+
+          # Find all example directories with app.py
+          for example_dir in examples/*/; do
+            example_name=$(basename "$example_dir")
+
+            # Skip if no app.py exists
+            if [ ! -f "${example_dir}app.py" ]; then
+              echo "Skipping $example_name (no app.py found)"
+              continue
+            fi
+
+            TOTAL=$((TOTAL + 1))
+            echo "======================================"
+            echo "Testing: $example_name"
+            echo "======================================"
+
+            # Create isolated virtual environment for this example
+            venv_dir=$(mktemp -d)
+            log_file=$(mktemp)
+
+            # Setup trap for cleanup
+            cleanup() {
+              # Kill app process if still running
+              if [ -n "${APP_PID:-}" ]; then
+                if kill -0 $APP_PID 2>/dev/null; then
+                  kill $APP_PID 2>/dev/null || true
+                  sleep 1
+                  # Force kill if still running
+                  if kill -0 $APP_PID 2>/dev/null; then
+                    kill -9 $APP_PID 2>/dev/null || true
+                  fi
+                fi
+                wait $APP_PID 2>/dev/null || true
+              fi
+              # Clean up temp files
+              rm -f "$log_file"
+              rm -rf "$venv_dir"
+            }
+            trap cleanup EXIT
+
+            # Create and activate virtual environment
+            python -m venv "$venv_dir"
+            source "$venv_dir/bin/activate"
+
+            # Install py-shiny in the isolated environment
+            pip install -q -e .
+
+            # Install example-specific requirements if they exist
+            if [ -f "${example_dir}requirements.txt" ]; then
+              echo "Installing dependencies from requirements.txt..."
+              if ! pip install -q -r "${example_dir}requirements.txt" 2>&1 | tee -a "$log_file"; then
+                echo "Failed to install dependencies for $example_name"
+                echo ""
+                echo "Error output:"
+                tail -20 "$log_file"
+                FAILED_EXAMPLES+=("$example_name (dependency installation failed)")
+                deactivate
+                cleanup
+                trap - EXIT
+                echo ""
+                continue
+              fi
+            fi
+
+            # Find an available port
+            PORT=$(python -c "import socket; s=socket.socket(); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")
+            echo "Starting application on port $PORT..."
+
+            # Run the app in the background with timeout
+            timeout 15s python -m shiny run "${example_dir}app.py" --port "$PORT" > "$log_file" 2>&1 &
+            APP_PID=$!
+
+            # Wait for app to start (up to 5 seconds)
+            STARTED=false
+            for i in {1..10}; do
+              sleep 0.5
+              if kill -0 $APP_PID 2>/dev/null; then
+                # Check if app is actually serving HTTP
+                if curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT" > /dev/null 2>&1; then
+                  STARTED=true
+                  break
+                fi
+              else
+                # Process died
+                break
+              fi
+            done
+
+            # Check if process is still running and responding
+            if ! $STARTED || ! kill -0 $APP_PID 2>/dev/null; then
+              echo "Application failed to start or crashed immediately"
+              echo ""
+              echo "Error output:"
+              cat "$log_file"
+              FAILED_EXAMPLES+=("$example_name (startup failure)")
+              deactivate
+              cleanup
+              trap - EXIT
+              echo ""
+              continue
+            fi
+
+            # Make HTTP request to verify it's working
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT" 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "Application started but returned HTTP $HTTP_CODE"
+              echo ""
+              echo "Log output:"
+              cat "$log_file"
+              FAILED_EXAMPLES+=("$example_name (HTTP $HTTP_CODE)")
+              deactivate
+              cleanup
+              trap - EXIT
+              echo ""
+              continue
+            fi
+
+            # Check the log for errors - use more specific patterns to avoid false positives
+            # Look for actual Python errors/exceptions with context
+            if grep -E "^(Traceback \(most recent call last\)|.*Error: |.*Exception: )" "$log_file" > /dev/null || \
+               grep -E "(raise |raised |ERROR |CRITICAL |Fatal )" "$log_file" > /dev/null; then
+              echo "Detected errors or exceptions in output:"
+              echo ""
+              grep -E "^(Traceback \(most recent call last\)|.*Error: |.*Exception: |raise |raised |ERROR |CRITICAL |Fatal )" "$log_file" || true
+              echo ""
+              FAILED_EXAMPLES+=("$example_name (errors/exceptions detected)")
+              echo "Test failed due to errors"
+            else
+              echo "Application started successfully with no errors"
+              PASSED_EXAMPLES+=("$example_name")
+            fi
+
+            # Cleanup
+            deactivate
+            cleanup
+            trap - EXIT
+            echo ""
+          done
+
+          echo "======================================"
+          echo "Test Summary"
+          echo "======================================"
+          echo ""
+          echo "Total examples tested: $TOTAL"
+          echo "Passed: ${#PASSED_EXAMPLES[@]}"
+          echo "Failed: ${#FAILED_EXAMPLES[@]}"
+          echo ""
+
+          if [ ${#PASSED_EXAMPLES[@]} -gt 0 ]; then
+            echo "Passed examples:"
+            for example in "${PASSED_EXAMPLES[@]}"; do
+              echo "  - $example"
+            done
+            echo ""
+          fi
+
+          if [ ${#FAILED_EXAMPLES[@]} -gt 0 ]; then
+            echo "Failed examples:"
+            for example in "${FAILED_EXAMPLES[@]}"; do
+              echo "  - $example"
+            done
+            echo ""
+
+            # Save failed examples for issue creation
+            echo "FAILED_COUNT=${#FAILED_EXAMPLES[@]}" >> $GITHUB_OUTPUT
+            {
+              echo "FAILED_LIST<<EOF"
+              for example in "${FAILED_EXAMPLES[@]}"; do
+                echo "- $example"
+              done
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+
+            exit 1
+          else
+            echo "All examples passed!"
+            echo "FAILED_COUNT=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create issue on failure
+        if: failure() && steps.test-examples.outputs.FAILED_COUNT > 0
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failedCount = '${{ steps.test-examples.outputs.FAILED_COUNT }}';
+            const failedList = `${{ steps.test-examples.outputs.FAILED_LIST }}`;
+            const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+
+            const issueTitle = `Scheduled Examples Test Failed - ${failedCount} example(s) failing`;
+            const issueBody = `## Scheduled Examples Test Failure
+
+The scheduled test of example applications has detected failures.
+
+### Failed Examples
+${failedList}
+
+### Details
+- **Run Date**: ${new Date().toISOString().split('T')[0]}
+- **Workflow Run**: [View full logs](${runUrl})
+- **Python Version**: ${{ matrix.python-version }}
+
+### Next Steps
+1. Review the [workflow logs](${runUrl}) for detailed error messages
+2. Test the failing examples locally
+3. Fix any startup errors, exceptions, or critical warnings
+4. Ensure all example dependencies are correctly specified
+
+---
+*This issue was automatically created by the \`test-examples-scheduled.yaml\` workflow.*`;
+
+            // Create new issue
+            const newIssue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: issueBody,
+              labels: ['scheduled-test-failure', 'examples', 'bug']
+            });
+            console.log(`Created new issue #${newIssue.data.number}`);
